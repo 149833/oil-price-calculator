@@ -1,68 +1,98 @@
-import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-import pandas as pd
 
-# 設定網頁標題與圖示
-st.set_page_config(page_title="中油油價計算器", page_icon="⛽", layout="centered")
-
-st.title("⛽ 中油油價自動計算器")
-st.markdown("自動從中油歷史價格網頁抓取最新數據")
-
-# --- 抓取數據函數 ---
-@st.cache_data(ttl=3600)  # 快取資料 1 小時，避免頻繁請求官網
-def get_cpc_prices():
+def get_cpc_92_price_from_history():
+    """
+    嘗試從中油網頁抓取 92 無鉛汽油價格。
+    如果成功回傳價格(float)，失敗回傳 None。
+    """
     url = "https://www.cpc.com.tw/historyprice.aspx?n=2890"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, timeout=5) # 設定 5 秒超時，避免卡住
         response.encoding = 'utf-8'
+        
+        if response.status_code != 200:
+            print(f"網頁連線異常 (狀態碼：{response.status_code})")
+            return None
+
         soup = BeautifulSoup(response.text, 'html.parser')
+        tables = soup.find_all('table')
         
-        # 抓取表格中第一列數據
-        table = soup.find("table")
-        first_row = table.find_all("tr")[1]
-        cols = first_row.find_all("td")
+        for table in tables:
+            headers = [th.text.strip() for th in table.find_all('th')]
+            if "92 無鉛汽油" in str(headers):
+                rows = table.find_all('tr')
+                if len(rows) > 1:
+                    latest_row = rows[1]
+                    cols = latest_row.find_all('td')
+                    
+                    if len(cols) >= 2:
+                        price_text = cols[1].text.strip()
+                        date_text = cols[0].text.strip()
+                        print(f"已成功抓取中油官網資料 (生效日期: {date_text})")
+                        return float(price_text)
         
-        return {
-            "date": cols[0].text.strip(),
-            "92": float(cols[1].text.strip()),
-            "95": float(cols[2].text.strip())
-        }
-    except Exception as e:
-        st.error(f"無法抓取即時油價：{e}")
+        print("警告：網頁結構改變，找不到價格資料。")
         return None
 
-# --- 執行抓取 ---
-prices = get_cpc_prices()
+    except Exception as e:
+        print(f"自動抓取失敗：{e}")
+        return None
 
-if prices:
-    st.info(f"📅 最新調價日期：{prices['date']}")
+def get_valid_price_input():
+    """
+    當自動抓取失敗時，讓使用者手動輸入的函式
+    """
+    while True:
+        try:
+            user_input = input(">> 請手動輸入今日 '92無鉛汽油' 單價：")
+            price = float(user_input)
+            if price > 0:
+                return price
+            else:
+                print("油價必須大於 0，請重新輸入。")
+        except ValueError:
+            print("格式錯誤，請輸入數字 (例如: 26.8)。")
 
-    # --- 使用者輸入介面 ---
-    # 選擇油品
-    oil_option = st.radio("請選擇油品：", ["92 無鉛汽油", "95 無鉛汽油"], horizontal=True)
+def calculate_liters():
+    print("--- 自動油價試算程式 (含手動備援) ---")
     
-    # 基礎單價判斷
-    base_price = prices["92"] if "92" in oil_option else prices["95"]
+    # 1. 嘗試獲取油單價
+    unit_price = get_cpc_92_price_from_history()
     
-    # 折扣輸入（預設為 0）
-    discount = st.number_input(f"每公升折扣金額 (元)", min_value=0.0, value=0.0, step=0.1)
-
-    # 計算實付單價
-    final_unit_price = base_price - discount
+    # 如果抓取失敗 (unit_price 是 None)，切換為手動輸入模式
+    if unit_price is None:
+        print("無法取得線上價格，轉為手動輸入模式。")
+        unit_price = get_valid_price_input()
+        
+    print(f"今日計算基準單價： {unit_price} 元/公升")
     
-    st.subheader(f"💰 實付單價：{final_unit_price:.2f} 元/L")
+    # 2. 設定折扣
+    try:
+        discount_input = input("請輸入每公升折扣金額 (預設為0，直接按 Enter 跳過): ")
+        if discount_input.strip() == "":
+            discount = 0.0
+        else:
+            discount = float(discount_input)
+    except ValueError:
+        print("折扣輸入錯誤，將設為 0")
+        discount = 0.0
 
-    # --- 計算 80-150 元列表 ---
-    data = []
-    for total in range(80, 155, 5):
-        liters = round(total / final_unit_price, 2)
-        data.append({"總價 (元)": total, "公升數 (L)": liters})
+    final_unit_price = unit_price - discount
+    print(f"折扣後單價： {final_unit_price:.2f} 元/公升")
+    print("-" * 35)
+    print(f"{'總價 (元)':<10} | {'公升數 (L)':<10}")
+    print("-" * 35)
 
-    # 顯示表格
-    df = pd.DataFrame(data)
-    st.table(df) # 在手機上使用 table 顯示較為直觀
+    # 3. 總價設定從 80 開始，每 5 為單位，列至 150
+    for total_price in range(80, 151, 5):
+        if final_unit_price <= 0:
+            print(f"{total_price:<14} | 錯誤 (單價<=0)")
+        else:
+            liters = total_price / final_unit_price
+            liters_rounded = round(liters, 2)
+            print(f"{total_price:<14} | {liters_rounded:<10}")
 
-else:
-    st.warning("目前無法取得數據，請確認網路連線或稍後再試。")
+if __name__ == "__main__":
+    calculate_liters()
